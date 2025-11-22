@@ -1,0 +1,13 @@
+# Proxmox Terraform Configuration
+# Copy this file to terraform.tfvars and fill in your values
+# terraform.tfvars is gitignored and will not be committed
+
+proxmox_url              = "https://gpu01.specterrealm.com:8006/api2/json"
+proxmox_api_token_id    = "terraform@pam!imagefactory"
+proxmox_api_token_secret = "your-token-secret-here"
+proxmox_insecure         = false
+
+cluster_name            = "pve-cluster01"
+default_storage_pool    = "disk-image-nfs-nas02"
+default_network_bridge  = "vmbr0"
+
