@@ -1,0 +1,38 @@
+# Proxmox Terraform Import IDs
+# This file contains all the import commands needed to import existing Proxmox resources
+# Run: ./scripts/import-all-resources.sh to import all resources at once
+# Or run individual commands manually
+
+# =============================================================================
+# Storage Resources
+# =============================================================================
+# NOTE: Storage resources are NOT supported by the bpg/proxmox provider.
+# Storage pools must be managed manually through the Proxmox web UI or API.
+# Storage configuration is documented in ../../specs-homelab/proxmox-discovery/
+#
+# Storage resources have been removed from this import list as they cannot be
+# managed via Terraform with the bpg/proxmox provider.
+
+# =============================================================================
+# Network Resources
+# =============================================================================
+# Format: proxmox_virtual_environment_network_linux_bridge.resource_name = "node-name/interface-name"
+proxmox_virtual_environment_network_linux_bridge.gpu01_vmbr0 = "GPU01/vmbr0"
+proxmox_virtual_environment_network_linux_bridge.gpu01_vmbr1 = "GPU01/vmbr1"
+proxmox_virtual_environment_network_linux_vlan.gpu01_enp11s0_12 = "GPU01/enp11s0.12"
+
+# =============================================================================
+# Virtual Machines (QEMU)
+# =============================================================================
+# Format: proxmox_virtual_environment_vm.resource_name = "node-name/vm-id"
+# Note: Only VMs that actually exist in Proxmox are listed
+proxmox_virtual_environment_vm.minecraft01 = "GPU01/103"
+proxmox_virtual_environment_vm.ubuntu_24_04_hardened_template = "GPU01/100"
+proxmox_virtual_environment_vm.test4 = "GPU01/101"
+
+# =============================================================================
+# Resource Pools
+# =============================================================================
+# Format: proxmox_virtual_environment_pool.resource_name = "pool-id"
+proxmox_virtual_environment_pool.gitops = "gitops"
+
