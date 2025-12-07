@@ -1,0 +1,233 @@
+---
+# Playbook: Configure VLAN Routing on Proxmox Hosts
+# Purpose: Enable routing from VLAN 10 (Production) to VLAN 30 (Storage) for VM access to NFS shares
+# Target: Proxmox hosts (GPU01, NUC01, NUC02)
+#
+# This allows VMs on VLAN 10 to access NFS shares on VLAN 30 via Proxmox host routing,
+# following the security policy that only physical hosts have direct VLAN 30 access.
+
+- name: Configure VLAN Routing on Proxmox Hosts
+  become: true
+  become_method: ansible.builtin.sudo
+  hosts: proxmox_hosts
+  gather_facts: true
+
+  vars:
+    # VLAN network definitions
+    vlan10_network: "172.16.10.0/24" # Production
+    vlan30_network: "172.16.30.0/24" # Storage
+
+    # Proxmox VLAN 10 IP (for routing)
+    # This IP allows VMs on VLAN 10 to route through Proxmox to VLAN 30
+    proxmox_vlan10_ip: "172.16.10.10" # Proxmox IP on VLAN 10
+
+    # Network interfaces (will be detected)
+    # vmbr0: VLAN-aware bridge for VLAN 10, 15, etc.
+    # vmbr1: VLAN-aware bridge for VLAN 30
+
+  tasks:
+    - name: Detect network bridges
+      ansible.builtin.shell: |
+        ip -o link show | grep -E "vmbr[0-9]+" | awk '{print $2}' | sed 's/:$//' || true
+      register: network_bridges
+      changed_when: false
+      args:
+        executable: /bin/bash
+
+    - name: Display detected bridges
+      ansible.builtin.debug:
+        msg: "Detected bridges: {{ network_bridges.stdout_lines }}"
+
+    - name: Check if VLAN 10 sub-interface exists
+      ansible.builtin.shell: |
+        ip -o link show | grep -E "vmbr0\.10@" || true
+      register: vlan10_interface_check
+      changed_when: false
+      args:
+        executable: /bin/bash
+
+    - name: Create VLAN 10 sub-interface if it doesn't exist
+      ansible.builtin.command: >
+        ip link add link vmbr0 name vmbr0.10 type vlan id 10
+      register: create_vlan10_interface
+      failed_when: create_vlan10_interface.rc != 0 and "File exists" not in create_vlan10_interface.stderr
+      changed_when: create_vlan10_interface.rc == 0
+
+    - name: Bring up VLAN 10 sub-interface
+      ansible.builtin.command: ip link set vmbr0.10 up
+      when: create_vlan10_interface.rc == 0
+      register: bring_up_vlan10
+
+    - name: Check if Proxmox already has IP on VLAN 10 sub-interface
+      ansible.builtin.shell: |
+        ip addr show vmbr0.10 | grep -E "172\.16\.10\.[0-9]+" || true
+      register: vlan10_ip_check
+      changed_when: false
+      args:
+        executable: /bin/bash
+
+    - name: Add VLAN 10 IP to sub-interface (if not present)
+      ansible.builtin.command: >
+        ip addr add {{ proxmox_vlan10_ip }}/24 dev vmbr0.10
+      register: add_vlan10_ip
+      failed_when: add_vlan10_ip.rc != 0 and "File exists" not in add_vlan10_ip.stderr
+      changed_when: add_vlan10_ip.rc == 0
+
+    - name: Make VLAN 10 sub-interface persistent (add to /etc/network/interfaces)
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - VLAN 10 routing"
+        block: |
+          # VLAN 10 interface for routing (added for VM storage access)
+          auto vmbr0.10
+          iface vmbr0.10 inet static
+                  address {{ proxmox_vlan10_ip }}/24
+        backup: true
+      when: add_vlan10_ip.rc == 0 or vlan10_ip_check.stdout != ""
+
+    - name: Enable IP forwarding (runtime)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        sysctl_set: true
+        reload: true
+
+    - name: Enable IP forwarding (persistent)
+      ansible.builtin.lineinfile:
+        path: /etc/sysctl.conf
+        regexp: "^net.ipv4.ip_forward"
+        line: "net.ipv4.ip_forward=1"
+        state: present
+        backup: true
+
+    - name: Ensure sysctl.d directory exists
+      ansible.builtin.file:
+        path: /etc/sysctl.d
+        state: directory
+        mode: "0755"
+
+    - name: Create persistent IP forwarding configuration
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-proxmox-routing.conf
+        content: |
+          # Proxmox VLAN Routing Configuration
+          # Enable IP forwarding for inter-VLAN routing
+          net.ipv4.ip_forward=1
+        mode: "0644"
+        backup: true
+
+    - name: Check if iptables is installed
+      ansible.builtin.command: which iptables
+      register: iptables_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install iptables if not present
+      ansible.builtin.apt:
+        name: iptables
+        state: present
+        update_cache: true
+      when: iptables_check.rc != 0
+
+    - name: Check current iptables FORWARD rules
+      ansible.builtin.command: iptables -t filter -L FORWARD -n --line-numbers
+      register: current_forward_rules
+      changed_when: false
+      failed_when: false
+
+    - name: Display current FORWARD rules
+      ansible.builtin.debug:
+        var: current_forward_rules.stdout_lines
+      when: current_forward_rules.rc == 0
+
+    - name: Check if VLAN 10 to VLAN 30 forwarding rule exists
+      ansible.builtin.command: >
+        iptables -t filter -C FORWARD
+        -s {{ vlan10_network }}
+        -d {{ vlan30_network }}
+        -j ACCEPT
+      register: rule_10_to_30_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Allow forwarding from VLAN 10 to VLAN 30
+      ansible.builtin.command: >
+        iptables -t filter -I FORWARD 1
+        -s {{ vlan10_network }}
+        -d {{ vlan30_network }}
+        -j ACCEPT
+      when:
+        - rule_10_to_30_exists.rc != 0
+      register: iptables_forward_10_to_30
+      changed_when: iptables_forward_10_to_30.rc == 0
+
+    - name: Check if VLAN 30 to VLAN 10 forwarding rule exists
+      ansible.builtin.command: >
+        iptables -t filter -C FORWARD
+        -s {{ vlan30_network }}
+        -d {{ vlan10_network }}
+        -j ACCEPT
+      register: rule_30_to_10_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Allow forwarding from VLAN 30 to VLAN 10 (return traffic)
+      ansible.builtin.command: >
+        iptables -t filter -I FORWARD 1
+        -s {{ vlan30_network }}
+        -d {{ vlan10_network }}
+        -j ACCEPT
+      when:
+        - rule_30_to_10_exists.rc != 0
+      register: iptables_forward_30_to_10
+      changed_when: iptables_forward_30_to_10.rc == 0
+
+    - name: Check if iptables-persistent is installed
+      ansible.builtin.command: which iptables-save
+      register: iptables_save_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install iptables-persistent if not present
+      ansible.builtin.apt:
+        name: iptables-persistent
+        state: present
+        update_cache: true
+      when: iptables_save_check.rc != 0
+
+    - name: Ensure iptables rules directory exists
+      ansible.builtin.file:
+        path: /etc/iptables
+        state: directory
+        mode: "0755"
+
+    - name: Save current iptables rules (for iptables-persistent)
+      ansible.builtin.shell: iptables-save > /etc/iptables/rules.v4
+      register: save_iptables
+      changed_when: false
+      when: iptables_forward_10_to_30.changed or iptables_forward_30_to_10.changed
+
+    - name: Display saved iptables rules
+      ansible.builtin.debug:
+        msg: "Current iptables rules saved to /etc/iptables/rules.v4"
+      when: iptables_forward_10_to_30.changed or iptables_forward_30_to_10.changed
+
+    - name: Verify IP forwarding is enabled
+      ansible.builtin.command: sysctl net.ipv4.ip_forward
+      register: ip_forward_check
+      changed_when: false
+
+    - name: Display IP forwarding status
+      ansible.builtin.debug:
+        msg: "IP forwarding status: {{ ip_forward_check.stdout }}"
+
+    - name: Display iptables FORWARD rules after configuration
+      ansible.builtin.command: iptables -t filter -L FORWARD -n -v --line-numbers
+      register: final_forward_rules
+      changed_when: false
+
+    - name: Show configured FORWARD rules
+      ansible.builtin.debug:
+        var: final_forward_rules.stdout_lines
+      when: final_forward_rules.rc == 0
