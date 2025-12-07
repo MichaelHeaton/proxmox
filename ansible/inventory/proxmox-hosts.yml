@@ -1,0 +1,18 @@
+---
+# Inventory for Proxmox Hosts
+# IP addresses from specs-homelab/reference/common-values.md
+
+all:
+  children:
+    proxmox_hosts:
+      hosts:
+        gpu01:
+          ansible_host: 172.16.15.10
+          ansible_user: root
+        # nuc01:
+        #   ansible_host: 172.16.15.11
+        #   ansible_user: root
+        # nuc02:
+        #   ansible_host: 172.16.15.12
+        #   ansible_user: root
+

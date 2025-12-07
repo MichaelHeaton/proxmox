@@ -1,0 +1,120 @@
+---
+# Playbook: Mount Application Data NFS Shares on Proxmox Hosts
+# Purpose: Mount media_streaming (NAS02) and backup (NAS01) shares for VM passthrough
+# Target: Proxmox hosts (GPU01, NUC01, NUC02)
+
+- name: Mount Application Data NFS Shares on Proxmox Hosts
+  become: true
+  become_method: sudo
+  hosts: proxmox_hosts
+  gather_facts: true
+
+  vars:
+    nas01_storage_ip: "172.16.30.5"
+    nas02_storage_ip: "172.16.30.4"
+    nfs_shares:
+      - name: streaming
+        server_ip: "{{ nas02_storage_ip }}"
+        remote_path: "/var/nfs/shared/media_streaming"
+        fallback_path: "/volume/5bd51c40-bd8d-4b3e-b55f-93313cf27906/.srv/.unifi-drive/media_streaming/.data"
+        local_path: "/mnt/nas/streaming"
+        description: "Streaming media share for Plex and related services (NAS02)"
+      - name: backups
+        server_ip: "{{ nas01_storage_ip }}"
+        remote_path: "/volume3/backup"
+        local_path: "/mnt/nas/backups"
+        description: "General backup storage for application databases (NAS01)"
+
+  tasks:
+    - name: Ensure NFS client utilities are installed
+      ansible.builtin.apt:
+        name:
+          - nfs-common
+        state: present
+        update_cache: true
+
+    - name: Create mount point directories
+      ansible.builtin.file:
+        path: "{{ item.local_path }}"
+        state: directory
+        mode: "0755"
+        owner: root
+        group: root
+      loop: "{{ nfs_shares }}"
+
+    - name: Test NFS connectivity
+      ansible.builtin.command: showmount -e {{ item.server_ip }}
+      register: nfs_exports
+      changed_when: false
+      failed_when: false
+      loop: "{{ nfs_shares }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Display available NFS exports
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }} exports from {{ item.item.server_ip }}: {{ item.stdout_lines }}"
+      loop: "{{ nfs_exports.results }}"
+      when: item.rc == 0
+
+    - name: Add NFS mounts to /etc/fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "{{ item.server_ip }}:{{ item.remote_path }} {{ item.local_path }} nfs4 vers=4,rsize=1048576,wsize=1048576,hard,intr,timeo=600,actimeo=600,_netdev 0 0"
+        regexp: "^{{ item.server_ip }}:{{ item.remote_path }}"
+        state: present
+        backup: true
+      loop: "{{ nfs_shares }}"
+
+    - name: Try mounting NFS shares (primary path)
+      ansible.posix.mount:
+        path: "{{ item.local_path }}"
+        src: "{{ item.server_ip }}:{{ item.remote_path }}"
+        fstype: nfs4
+        state: mounted
+        opts: vers=4,rsize=1048576,wsize=1048576,hard,intr,timeo=600,actimeo=600,_netdev
+      loop: "{{ nfs_shares }}"
+      ignore_errors: true
+      register: mount_results
+      when: item.fallback_path is not defined
+
+    - name: Try mounting streaming share with fallback path (if primary fails)
+      ansible.posix.mount:
+        path: "{{ item.local_path }}"
+        src: "{{ item.server_ip }}:{{ item.fallback_path }}"
+        fstype: nfs4
+        state: mounted
+        opts: vers=4,rsize=1048576,wsize=1048576,hard,intr,timeo=600,actimeo=600,_netdev
+      loop: "{{ nfs_shares }}"
+      when:
+        - item.fallback_path is defined
+        - item.name == "streaming"
+      ignore_errors: true
+      register: mount_results_fallback
+
+    - name: Display mount results
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }}: {{ 'Mounted successfully' if item.changed else ('Already mounted' if item.rc == 0 else 'Failed - check share path') }}"
+      loop: "{{ mount_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: mount_results.results is defined
+
+    - name: Display fallback mount results
+      ansible.builtin.debug:
+        msg: "{{ item.item.name }} (fallback): {{ 'Mounted successfully' if item.changed else ('Already mounted' if not item.failed else 'Failed') }}"
+      loop: "{{ mount_results_fallback.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: mount_results_fallback.results is defined
+
+    - name: Verify NFS mounts
+      ansible.builtin.shell: mount | grep "{{ item.local_path }}" || true
+      register: mount_verification
+      changed_when: false
+      loop: "{{ nfs_shares }}"
+
+    - name: Display mount verification results
+      ansible.builtin.debug:
+        var: mount_verification.results
+      when: mount_verification.results is defined
