@@ -164,6 +164,9 @@ resource "proxmox_virtual_environment_network_linux_bridge" "gpu01_vmbr1" {
 
   vlan_aware = true
 
+  # Note: enp11s0 is a 10 GbE SFP+ interface dedicated to high-bandwidth storage access (VLAN 30)
+  # This provides 10x the bandwidth compared to NUC01/NUC02's 1 GbE interfaces
+  # VMs requiring high storage I/O should remain on GPU01 to utilize this 10 GbE connection
 }
 
 # GPU01 VLAN Interface
@@ -175,6 +178,32 @@ resource "proxmox_virtual_environment_network_linux_vlan" "gpu01_enp11s0_12" {
 
   address = "172.16.12.10/24"
 }
+
+# NUC02 Network Bridges
+# Note: NUC02 has only one NIC (enp89s0, 1 GbE), so it uses a single VLAN-aware bridge (vmbr0)
+# with VLAN sub-interfaces, unlike GPU01 which has separate bridges on separate NICs
+#
+# Architecture difference:
+# - GPU01: vmbr0 (1 GbE) for general network, vmbr1 (10 GbE SFP+) for storage
+# - NUC02: vmbr0 (1 GbE) for all traffic, including storage (limited to 1 GbE)
+#
+# Performance impact: VMs migrated from GPU01 to NUC02 will have 10x slower storage access
+# (1 GbE vs 10 GbE). Consider keeping storage-intensive VMs on GPU01.
+resource "proxmox_virtual_environment_network_linux_bridge" "nuc02_vmbr0" {
+  node_name = "NUC02"
+  name      = "vmbr0"
+
+  address = "172.16.15.12/24"
+  gateway = "172.16.15.1"
+
+  ports = ["enp89s0"]
+
+  vlan_aware = true
+}
+
+# Note: NUC02 does NOT have vmbr1 - it uses vmbr0 with VLAN tagging instead
+# VMs that need VLAN 30 (storage) access should use: bridge=vmbr0,tag=30
+# This will work but is limited to 1 GbE instead of GPU01's 10 GbE storage connection
 
 # Physical Interface Configuration (MTU)
 # Note: Physical interface MTU configuration may need to be managed separately
